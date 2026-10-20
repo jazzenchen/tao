@@ -145,6 +145,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
   "NSScreen",
   "NSView",
   "NSWindow",
+  "NSPanel",
   "NSUserActivity",
 ] }
 core-foundation = "0.10"

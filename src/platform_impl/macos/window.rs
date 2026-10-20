@@ -7,7 +7,6 @@ use std::{
   collections::VecDeque,
   convert::TryInto,
   f64,
-  ffi::CStr,
   os::raw::c_void,
   sync::{
     atomic::{AtomicBool, Ordering},
@@ -48,10 +47,10 @@ use core_graphics::{
 use objc2::{
   msg_send,
   rc::Retained,
-  runtime::{AnyClass as Class, AnyObject as Object, Bool, ClassBuilder as ClassDecl, Sel},
+  runtime::Bool,
 };
 use objc2_app_kit::{
-  self as appkit, NSApp, NSApplicationPresentationOptions, NSBackingStoreType, NSColor, NSEvent,
+  self as appkit, NSApp, NSApplicationPresentationOptions, NSBackingStoreType, NSColor,
   NSEventModifierFlags, NSEventSubtype, NSEventType, NSRequestUserAttentionType, NSScreen, NSView,
   NSWindow, NSWindowButton, NSWindowCollectionBehavior, NSWindowFullScreenButton,
   NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask,
@@ -60,7 +59,6 @@ use objc2_foundation::{
   ns_string, MainThreadMarker, NSArray, NSAutoreleasePool, NSDictionary, NSInteger, NSPoint,
   NSRect, NSSize, NSString, NSTimeInterval, NSUInteger,
 };
-use std::sync::LazyLock;
 
 use super::{
   ffi::{id, nil, NO},
@@ -89,8 +87,27 @@ pub enum Parent {
   ChildOf(*mut c_void),
 }
 
+std::thread_local! {
+  static NONACTIVATING_PANEL_SCOPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with `PlatformSpecificWindowBuilderAttributes::default().nonactivating_panel`
+/// initialized to `true` for any `WindowBuilder` created on the current thread during `f`.
+pub fn with_nonactivating_panel<T>(f: impl FnOnce() -> T) -> T {
+  struct Reset(bool);
+  impl Drop for Reset {
+    fn drop(&mut self) {
+      NONACTIVATING_PANEL_SCOPE.with(|cell| cell.set(self.0));
+    }
+  }
+  let prev = NONACTIVATING_PANEL_SCOPE.with(|cell| cell.replace(true));
+  let _reset = Reset(prev);
+  f()
+}
+
 #[derive(Clone)]
 pub struct PlatformSpecificWindowBuilderAttributes {
+  pub nonactivating_panel: bool,
   pub parent: Parent,
   pub movable_by_window_background: bool,
   pub titlebar_transparent: bool,
@@ -110,6 +127,7 @@ impl Default for PlatformSpecificWindowBuilderAttributes {
   #[inline]
   fn default() -> Self {
     Self {
+      nonactivating_panel: NONACTIVATING_PANEL_SCOPE.with(|cell| cell.get()),
       parent: Parent::None,
       movable_by_window_background: false,
       titlebar_transparent: false,
@@ -243,7 +261,10 @@ fn create_window(
       masks |= NSWindowStyleMask::FullSizeContentView;
     }
 
-    let ns_window: id = msg_send![WINDOW_CLASS.0, alloc];
+    if pl_attrs.nonactivating_panel {
+      masks |= NSWindowStyleMask::NonactivatingPanel;
+    }
+    let ns_window: id = msg_send![window_class::window_class(pl_attrs.nonactivating_panel), alloc];
     let ns_window_ptr: id = msg_send![
       ns_window,
       initWithContentRect: frame,
@@ -252,7 +273,9 @@ fn create_window(
       defer: NO,
     ];
 
-    Retained::retain(ns_window_ptr).and_then(|r| r.downcast::<NSWindow>().ok()).map(|ns_window| {
+    // `alloc` + an `init`-family message already returns an owned +1. Adopt
+    // that reference; retaining here would leave the original +1 unbalanced.
+    Retained::from_raw(ns_window_ptr).and_then(|r| r.downcast::<NSWindow>().ok()).map(|ns_window| {
       #[allow(deprecated)]
       {
         *((*ns_window_ptr).get_mut_ivar::<Bool>("focusable")) = attrs.focusable.into();
@@ -262,6 +285,12 @@ fn create_window(
       ns_window.setReleasedWhenClosed(false);
       ns_window.setTitle(&title);
       ns_window.setAcceptsMouseMovedEvents(true);
+      if pl_attrs.nonactivating_panel {
+        let panel = ns_window.downcast_ref::<objc2_app_kit::NSPanel>().expect("panel class was selected before allocation");
+        panel.setHidesOnDeactivate(false);
+        panel.setBecomesKeyOnlyIfNeeded(true);
+        panel.setFloatingPanel(true);
+      }
 
       if pl_attrs.titlebar_transparent {
         ns_window.setTitlebarAppearsTransparent(true);
@@ -401,51 +430,7 @@ pub(super) fn set_ns_theme(theme: Option<Theme>) {
   }
 }
 
-struct WindowClass(&'static Class);
-
-static WINDOW_CLASS: LazyLock<WindowClass> = LazyLock::new(|| unsafe {
-  let window_superclass = class!(NSWindow);
-  let mut decl = ClassDecl::new(
-    CStr::from_bytes_with_nul(b"TaoWindow\0").unwrap(),
-    window_superclass,
-  )
-  .unwrap();
-  decl.add_method(
-    sel!(canBecomeMainWindow),
-    is_focusable as extern "C" fn(_, _) -> _,
-  );
-  decl.add_method(
-    sel!(canBecomeKeyWindow),
-    is_focusable as extern "C" fn(_, _) -> _,
-  );
-  decl.add_method(sel!(sendEvent:), send_event as extern "C" fn(_, _, _));
-  // progress bar states, follows ProgressState
-  decl.add_ivar::<Bool>(CStr::from_bytes_with_nul(b"focusable\0").unwrap());
-  WindowClass(decl.register())
-});
-
-extern "C" fn is_focusable(this: &Object, _: Sel) -> Bool {
-  #[allow(deprecated)] // TODO: Use define_class!
-  unsafe {
-    *(this.get_ivar("focusable"))
-  }
-}
-
-extern "C" fn send_event(this: &Object, _sel: Sel, event: &NSEvent) {
-  unsafe {
-    let event_type = event.r#type();
-    if event_type == NSEventType::LeftMouseDown {
-      // When wkwebview is set on NSWindow, `WindowBuilder::with_movable_by_window_background` is not working.
-      // Because of this, we need to invoke `[NSWindow performWindowDragWithEvent]` in NSLeftMouseDown event.
-      let is_movable_window: bool = msg_send![this, isMovableByWindowBackground];
-      if is_movable_window {
-        let _: () = msg_send![this, performWindowDragWithEvent: event];
-      }
-    }
-    let superclass = util::superclass(this);
-    let _: () = msg_send![super(this, superclass), sendEvent: event];
-  }
-}
+mod window_class;
 
 #[derive(Default)]
 pub struct SharedState {
@@ -684,12 +669,7 @@ impl UnownedWindow {
 
   #[inline]
   pub fn set_focusable(&self, focusable: bool) {
-    #[allow(deprecated)] // TODO: Use define_class!
-    unsafe {
-      let ns_window =
-        Retained::into_raw(Retained::cast_unchecked::<Object>(self.ns_window.clone()));
-      *((*ns_window).get_mut_ivar::<Bool>("focusable")) = focusable.into();
-    }
+    window_class::set_focusable(&self.ns_window, focusable);
   }
 
   #[inline]
@@ -1789,3 +1769,17 @@ unsafe fn set_max_inner_size(window: &NSWindow, mut max_size: LogicalSize<f64>) 
     window.setFrame_display(current_rect, false)
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn nonactivating_panel_scope_applies_only_within_closure() {
+    assert!(!PlatformSpecificWindowBuilderAttributes::default().nonactivating_panel);
+    let inside = with_nonactivating_panel(|| PlatformSpecificWindowBuilderAttributes::default());
+    assert!(inside.nonactivating_panel);
+    assert!(!PlatformSpecificWindowBuilderAttributes::default().nonactivating_panel);
+  }
+}
+

@@ -16,6 +16,8 @@ use crate::{
   window::{Window, WindowBuilder},
 };
 
+pub use crate::platform_impl::with_nonactivating_panel;
+
 /// Additional methods on `Window` that are specific to MacOS.
 pub trait WindowExtMacOS {
   /// Returns a pointer to the cocoa `NSWindow` that is used by this window.
@@ -192,6 +194,9 @@ pub enum ActivationPolicy {
 ///  - `with_titlebar_buttons_hidden`
 ///  - `with_fullsize_content_view`
 pub trait WindowBuilderExtMacOS {
+  /// Allocates a dedicated NSPanel subclass with NonactivatingPanel style.
+  /// It retains Tao's focusable ivar, event forwarding and window delegate.
+  fn with_nonactivating_panel(self, enabled: bool) -> WindowBuilder;
   /// Sets a parent to the window to be created.
   fn with_parent_window(self, parent: *mut c_void) -> WindowBuilder;
   /// Enables click-and-drag behavior for the entire window, not just the titlebar.
@@ -222,6 +227,10 @@ pub trait WindowBuilderExtMacOS {
 }
 
 impl WindowBuilderExtMacOS for WindowBuilder {
+  fn with_nonactivating_panel(mut self, enabled: bool) -> WindowBuilder {
+    self.platform_specific.nonactivating_panel = enabled;
+    self
+  }
   #[inline]
   fn with_parent_window(mut self, parent: *mut c_void) -> WindowBuilder {
     self.platform_specific.parent = Parent::ChildOf(parent);

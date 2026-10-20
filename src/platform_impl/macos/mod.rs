@@ -30,7 +30,10 @@ pub use self::{
   keycode::{keycode_from_scancode, keycode_to_scancode},
   monitor::{MonitorHandle, VideoMode},
   progress_bar::set_progress_indicator,
-  window::{Id as WindowId, Parent, PlatformSpecificWindowBuilderAttributes, UnownedWindow},
+  window::{
+    with_nonactivating_panel, Id as WindowId, Parent, PlatformSpecificWindowBuilderAttributes,
+    UnownedWindow,
+  },
 };
 use crate::{
   error::OsError as RootOsError, event::DeviceId as RootDeviceId, window::WindowAttributes,

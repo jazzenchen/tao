@@ -8,7 +8,10 @@ use std::{
   error::Error,
   process,
   rc::Rc,
-  sync::atomic::{AtomicBool, Ordering},
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+  },
   time::Instant,
 };
 
@@ -56,8 +59,10 @@ pub struct EventLoopWindowTarget<T> {
   pub(crate) display: gdk::Display,
   /// Gtk application
   pub(crate) app: gtk::Application,
-  /// Window Ids of the application
-  pub(crate) windows: Rc<RefCell<HashSet<WindowId>>>,
+  /// Window Ids of the application. An `Arc`, not an `Rc`: Tauri's runtime handle holds a
+  /// clone of this target and is cloned and dropped on worker threads. Only the count crosses
+  /// threads; the set itself is used on the event loop thread.
+  pub(crate) windows: Arc<RefCell<HashSet<WindowId>>>,
   /// Window requests sender
   pub(crate) window_requests_tx: glib::Sender<(WindowId, WindowRequest)>,
   /// Draw event sender
@@ -247,7 +252,8 @@ impl<T: 'static> EventLoop<T> {
     let window_target = EventLoopWindowTarget {
       display,
       app,
-      windows: Rc::new(RefCell::new(HashSet::new())),
+      #[allow(clippy::arc_with_non_send_sync)]
+      windows: Arc::new(RefCell::new(HashSet::new())),
       window_requests_tx,
       draw_tx: draw_tx_,
       _marker: std::marker::PhantomData,

@@ -14,7 +14,6 @@ use std::{
   ffi::c_void,
   marker::PhantomData,
   mem, panic,
-  rc::Rc,
   sync::{Arc, LazyLock},
   thread,
   time::{Duration, Instant},
@@ -193,7 +192,11 @@ impl<T: 'static> EventLoop<T> {
     thread::spawn(move || wait_thread(thread_id, HWND(send_thread_msg_target as _)));
     let wait_thread_id = get_wait_thread_id();
 
-    let runner_shared = Rc::new(EventLoopRunner::new(thread_msg_target, wait_thread_id));
+    // Tauri's runtime handle holds a clone of the window target and is itself cloned and
+    // dropped on worker threads, so the count must be atomic. The runner's own state is
+    // still touched on the event loop thread only.
+    #[allow(clippy::arc_with_non_send_sync)]
+    let runner_shared = Arc::new(EventLoopRunner::new(thread_msg_target, wait_thread_id));
 
     let thread_msg_sender =
       insert_event_target_window_data::<T>(thread_msg_target, runner_shared.clone());

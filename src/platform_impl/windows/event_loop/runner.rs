@@ -7,7 +7,7 @@ use std::{
   cell::{Cell, RefCell},
   collections::{HashSet, VecDeque},
   mem, panic,
-  rc::Rc,
+  sync::Arc,
   time::Instant,
 };
 
@@ -24,7 +24,10 @@ use crate::{
   window::WindowId,
 };
 
-pub(crate) type EventLoopRunnerShared<T> = Rc<EventLoopRunner<T>>;
+// An `Arc`, not an `Rc`: the window target that holds this is cloned and dropped off the
+// event loop thread (see `EventLoop::new`). Only the count crosses threads; the `Cell` and
+// `RefCell` state below stays on the event loop thread.
+pub(crate) type EventLoopRunnerShared<T> = Arc<EventLoopRunner<T>>;
 pub(crate) struct EventLoopRunner<T: 'static> {
   // The event loop's win32 handles
   thread_msg_target: HWND,
